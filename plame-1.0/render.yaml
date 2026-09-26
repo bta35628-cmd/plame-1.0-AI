@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: plame-1-0
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    dockerfilePath: ./Dockerfile

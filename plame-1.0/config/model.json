@@ -1,0 +1,11 @@
+{
+  "id": "plame-1.0",
+  "name": "Plame 1.0",
+  "vision": true,
+  "chat": true,
+  "streaming": true,
+  "openai_compatible": true,
+  "authentication": false,
+  "context_length": 4096,
+  "backend": "llama.cpp"
+}
