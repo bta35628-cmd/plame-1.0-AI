@@ -1,68 +1,101 @@
 const express = require("express");
-const { spawn } = require("child_process");
-const fs = require("fs");
-const path = require("path");
 
 const app = express();
 
 const PORT = Number(process.env.PORT || 10000);
 
-const MODEL_NAME = "plame-1.0";
+const PUBLIC_MODEL = "pipo/plame-1.0";
+const UPSTREAM_MODEL = "llama3.1-8B";
 
-const MODEL_PATH =
-  process.env.MODEL_PATH ||
-  path.join(__dirname, "models", "plame-1.0.gguf");
+const UPSTREAM_URL =
+  process.env.UPSTREAM_URL ||
+  "https://cj2api.keh5.workers.dev/v1/chat/completions";
 
-const MMPROJ_PATH =
-  process.env.MMPROJ_PATH ||
-  path.join(__dirname, "models", "plame-1.0-mmproj.gguf");
+app.disable("x-powered-by");
 
-const LLAMA_SERVER =
-  process.env.LLAMA_SERVER ||
-  (process.platform === "win32"
-    ? "llama-server.exe"
-    : "llama-server");
+app.use(
+  express.json({
+    limit: "50mb"
+  })
+);
 
-const LLAMA_PORT = Number(process.env.LLAMA_PORT || 8081);
-
-let llamaProcess = null;
-
-app.use(express.json({
-  limit: "50mb"
-}));
+// ==============================
+// CORS
+// ==============================
 
 app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header(
+  res.setHeader(
+    "Access-Control-Allow-Origin",
+    "*"
+  );
+
+  res.setHeader(
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization"
   );
-  res.header(
+
+  res.setHeader(
     "Access-Control-Allow-Methods",
     "GET, POST, OPTIONS"
   );
 
   if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
+    return res.status(204).end();
   }
 
   next();
 });
 
+// ==============================
+// ERROR
+// ==============================
+
+function apiError(
+  res,
+  status,
+  message,
+  type = "invalid_request_error"
+) {
+  return res.status(status).json({
+    error: {
+      message,
+      type,
+      param: null,
+      code: null
+    }
+  });
+}
+
+// ==============================
+// PUBLIC MODEL
+// ==============================
+
 function publicModel() {
   return {
-    id: MODEL_NAME,
+    id: PUBLIC_MODEL,
     object: "model",
     created: Math.floor(Date.now() / 1000),
     owned_by: "plame"
   };
 }
 
+// ==============================
+// HOME
+// ==============================
+
 app.get("/", (req, res) => {
   res.json({
-    name: "Plame 1.0",
-    model: MODEL_NAME,
-    status: "online",
+    name: "PLAME 1.0",
+    id: PUBLIC_MODEL,
+
+    model: PUBLIC_MODEL,
+
+    upstream_model: UPSTREAM_MODEL,
+
+    upstream_url: UPSTREAM_URL,
+
+    vision: true,
+
     endpoints: {
       models: "/v1/models",
       chat: "/v1/chat/completions",
@@ -71,328 +104,369 @@ app.get("/", (req, res) => {
   });
 });
 
+// ==============================
+// HEALTH
+// ==============================
+
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
-    model: MODEL_NAME,
-    llamaServer: Boolean(llamaProcess)
+    model: PUBLIC_MODEL,
+    upstream_model: UPSTREAM_MODEL,
+    vision: true
   });
 });
+
+// ==============================
+// ONLY ONE MODEL
+// ==============================
 
 app.get("/v1/models", (req, res) => {
   res.json({
     object: "list",
+
     data: [
       publicModel()
     ]
   });
 });
 
-function normalizeMessages(messages) {
-  return messages.map(message => {
+// ==============================
+// HEADERS
+// ==============================
+
+function createUpstreamHeaders(req) {
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  const clientAuthorization =
+    req.get("authorization");
+
+  if (clientAuthorization) {
+    headers.Authorization =
+      clientAuthorization;
+  }
+
+  if (process.env.UPSTREAM_API_KEY) {
+    headers.Authorization =
+      "Bearer " +
+      process.env.UPSTREAM_API_KEY;
+  }
+
+  return headers;
+}
+
+// ==============================
+// CHECK VISION CONTENT
+// ==============================
+
+function containsVisionContent(messages) {
+  for (const message of messages) {
     if (!message || typeof message !== "object") {
-      return message;
+      continue;
     }
 
-    if (Array.isArray(message.content)) {
-      const textParts = [];
+    if (!Array.isArray(message.content)) {
+      continue;
+    }
 
-      for (const part of message.content) {
-        if (part.type === "text") {
-          textParts.push(part.text || "");
-        }
-
-        if (part.type === "image_url") {
-          textParts.push(
-            "\n[IMAGE INPUT]\n"
-          );
-        }
+    for (const part of message.content) {
+      if (!part || typeof part !== "object") {
+        continue;
       }
 
-      return {
-        role: message.role,
-        content: textParts.join("\n")
-      };
-    }
-
-    return {
-      role: message.role,
-      content: message.content
-    };
-  });
-}
-
-async function llamaRequest(body) {
-  const url =
-    `http://127.0.0.1:${LLAMA_PORT}/v1/chat/completions`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-
-  const text = await response.text();
-
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(text);
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      data.error?.message ||
-      text ||
-      `llama-server HTTP ${response.status}`
-    );
-  }
-
-  return data;
-}
-
-async function llamaStream(body, res) {
-  const url =
-    `http://127.0.0.1:${LLAMA_PORT}/v1/chat/completions`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      ...body,
-      stream: true
-    })
-  });
-
-  if (!response.ok || !response.body) {
-    const text = await response.text();
-
-    throw new Error(text);
-  }
-
-  res.status(200);
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-
-  const reader = response.body.getReader();
-
-  while (true) {
-    const { done, value } = await reader.read();
-
-    if (done) {
-      break;
-    }
-
-    res.write(Buffer.from(value));
-  }
-
-  res.end();
-}
-
-app.post("/v1/chat/completions", async (req, res) => {
-  try {
-    const body = req.body || {};
-
-    if (!Array.isArray(body.messages)) {
-      return res.status(400).json({
-        error: {
-          message: "messages must be an array",
-          type: "invalid_request_error"
-        }
-      });
-    }
-
-    const messages = normalizeMessages(body.messages);
-
-    const request = {
-      model: MODEL_NAME,
-      messages,
-
-      temperature:
-        typeof body.temperature === "number"
-          ? body.temperature
-          : 0.7,
-
-      top_p:
-        typeof body.top_p === "number"
-          ? body.top_p
-          : 0.95,
-
-      max_tokens:
-        typeof body.max_tokens === "number"
-          ? body.max_tokens
-          : 1024,
-
-      stream: Boolean(body.stream)
-    };
-
-    if (body.stop !== undefined) {
-      request.stop = body.stop;
-    }
-
-    if (body.seed !== undefined) {
-      request.seed = body.seed;
-    }
-
-    if (body.stream) {
-      await llamaStream(request, res);
-      return;
-    }
-
-    const result = await llamaRequest(request);
-
-    result.model = MODEL_NAME;
-
-    res.json(result);
-
-  } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: {
-        message: error.message || "Plame backend error",
-        type: "server_error"
-      }
-    });
-  }
-});
-
-async function waitForLlama(timeout = 120000) {
-  const started = Date.now();
-
-  while (Date.now() - started < timeout) {
-    try {
-      const response = await fetch(
-        `http://127.0.0.1:${LLAMA_PORT}/health`
-      );
-
-      if (response.ok) {
+      if (part.type === "image_url") {
         return true;
       }
-    } catch {}
 
-    await new Promise(resolve =>
-      setTimeout(resolve, 1000)
-    );
+      if (
+        part.type === "input_image" ||
+        part.type === "image"
+      ) {
+        return true;
+      }
+    }
   }
 
   return false;
 }
 
-function startLlama() {
-  if (!fs.existsSync(MODEL_PATH)) {
-    console.warn(
-      "Model file not found:",
-      MODEL_PATH
-    );
+// ==============================
+// CHAT COMPLETIONS
+// ==============================
 
-    console.warn(
-      "Plame API will start, but inference will not work until a GGUF model is installed."
-    );
+app.post(
+  "/v1/chat/completions",
+  async (req, res) => {
+    try {
+      const body = req.body || {};
 
-    return;
-  }
+      // messages required
+      if (!Array.isArray(body.messages)) {
+        return apiError(
+          res,
+          400,
+          "messages must be an array"
+        );
+      }
 
-  const args = [
-    "-m",
-    MODEL_PATH,
+      // Only pipo/plame-1.0 is accepted
+      if (
+        body.model &&
+        body.model !== PUBLIC_MODEL
+      ) {
+        return apiError(
+          res,
+          400,
+          "Only model " +
+            PUBLIC_MODEL +
+            " is supported"
+        );
+      }
 
-    "--alias",
-    MODEL_NAME,
+      const isVision =
+        containsVisionContent(
+          body.messages
+        );
 
-    "--host",
-    "127.0.0.1",
+      /*
+       * IMPORTANT:
+       *
+       * We do NOT modify:
+       *
+       * messages[].content
+       * image_url
+       * image data
+       * base64 image
+       * image URLs
+       *
+       * Vision content is forwarded unchanged.
+       */
 
-    "--port",
-    String(LLAMA_PORT),
+      const upstreamBody = {
+        ...body,
 
-    "--ctx-size",
-    process.env.CONTEXT_SIZE || "4096",
+        // Public model -> upstream model
+        model: UPSTREAM_MODEL
+      };
 
-    "--threads",
-    process.env.THREADS || "2",
+      // Optional metadata header
+      // This does not modify the request body.
+      const headers =
+        createUpstreamHeaders(req);
 
-    "--parallel",
-    "1",
+      if (isVision) {
+        headers["X-PLAME-Vision"] = "true";
+      }
 
-    "--jinja"
-  ];
+      console.log(
+        "Request:",
+        isVision
+          ? "VISION"
+          : "TEXT"
+      );
 
-  if (
-    fs.existsSync(MMPROJ_PATH) &&
-    process.env.ENABLE_VISION !== "false"
-  ) {
-    args.push(
-      "--mmproj",
-      MMPROJ_PATH
-    );
-  }
+      // ==============================
+      // SEND TO UPSTREAM
+      // ==============================
 
-  console.log(
-    "Starting llama-server:"
-  );
+      const upstreamResponse =
+        await fetch(
+          UPSTREAM_URL,
+          {
+            method: "POST",
 
-  console.log(
-    LLAMA_SERVER,
-    args.join(" ")
-  );
+            headers,
 
-  llamaProcess = spawn(
-    LLAMA_SERVER,
-    args,
-    {
-      stdio: "inherit"
+            body: JSON.stringify(
+              upstreamBody
+            )
+          }
+        );
+
+      const contentType =
+        upstreamResponse.headers.get(
+          "content-type"
+        ) || "";
+
+      // ==============================
+      // UPSTREAM ERROR
+      // ==============================
+
+      if (!upstreamResponse.ok) {
+        const errorText =
+          await upstreamResponse.text();
+
+        res.status(
+          upstreamResponse.status
+        );
+
+        res.setHeader(
+          "Content-Type",
+          contentType ||
+            "application/json"
+        );
+
+        return res.send(errorText);
+      }
+
+      // ==============================
+      // STREAMING
+      // ==============================
+
+      if (
+        body.stream === true ||
+        contentType.includes(
+          "text/event-stream"
+        )
+      ) {
+        res.status(
+          upstreamResponse.status
+        );
+
+        res.setHeader(
+          "Content-Type",
+          "text/event-stream"
+        );
+
+        res.setHeader(
+          "Cache-Control",
+          "no-cache"
+        );
+
+        res.setHeader(
+          "Connection",
+          "keep-alive"
+        );
+
+        if (!upstreamResponse.body) {
+          return res.end();
+        }
+
+        const reader =
+          upstreamResponse.body
+            .getReader();
+
+        while (true) {
+          const chunk =
+            await reader.read();
+
+          if (chunk.done) {
+            break;
+          }
+
+          res.write(
+            Buffer.from(
+              chunk.value
+            )
+          );
+        }
+
+        return res.end();
+      }
+
+      // ==============================
+      // NORMAL JSON
+      // ==============================
+
+      const responseText =
+        await upstreamResponse.text();
+
+      try {
+        const data =
+          JSON.parse(responseText);
+
+        // Return the public PLAME ID
+        data.model =
+          PUBLIC_MODEL;
+
+        return res
+          .status(
+            upstreamResponse.status
+          )
+          .json(data);
+
+      } catch {
+        res.setHeader(
+          "Content-Type",
+          contentType ||
+            "application/json"
+        );
+
+        return res
+          .status(
+            upstreamResponse.status
+          )
+          .send(responseText);
+      }
+
+    } catch (error) {
+      console.error(
+        "PLAME proxy error:",
+        error
+      );
+
+      return apiError(
+        res,
+        502,
+        error.message ||
+          "Upstream request failed",
+        "upstream_error"
+      );
     }
-  );
+  }
+);
 
-  llamaProcess.on("exit", code => {
+// ==============================
+// START
+// ==============================
+
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
     console.log(
-      `llama-server exited with code ${code}`
+      "================================"
     );
 
-    llamaProcess = null;
-  });
-
-  llamaProcess.on("error", error => {
-    console.error(
-      "Could not start llama-server:",
-      error
-    );
-  });
-}
-
-app.listen(PORT, "0.0.0.0", async () => {
-  console.log("");
-  console.log("==============================");
-  console.log("       PLAME 1.0");
-  console.log("==============================");
-  console.log(
-    `API: http://0.0.0.0:${PORT}`
-  );
-  console.log(
-    `Model: ${MODEL_NAME}`
-  );
-  console.log("==============================");
-  console.log("");
-
-  startLlama();
-
-  const ready = await waitForLlama();
-
-  if (ready) {
     console.log(
-      "llama-server is ready."
+      "          PLAME 1.0"
     );
-  } else {
+
     console.log(
-      "llama-server is not ready yet."
+      "================================"
+    );
+
+    console.log(
+      "Port: " + PORT
+    );
+
+    console.log(
+      "Public model: " +
+        PUBLIC_MODEL
+    );
+
+    console.log(
+      "Upstream model: " +
+        UPSTREAM_MODEL
+    );
+
+    console.log(
+      "Upstream: " +
+        UPSTREAM_URL
+    );
+
+    console.log(
+      "Vision: ENABLED"
+    );
+
+    console.log(
+      "Local model: NONE"
+    );
+
+    console.log(
+      "================================"
     );
   }
-});
+);
