@@ -3,5 +3,5 @@ services:
     name: plame-1-0
     runtime: docker
     plan: free
+    dockerfilePath: ./plame-1.0/Dockerfile
     healthCheckPath: /health
-    dockerfilePath: ./Dockerfile
