@@ -1,11 +1,17 @@
 {
-  "id": "plame-1.0",
-  "name": "Plame 1.0",
+  "id": "pipo/plame-1.0",
+  "name": "PLAME 1.0",
   "vision": true,
   "chat": true,
   "streaming": true,
   "openai_compatible": true,
   "authentication": false,
   "context_length": 4096,
-  "backend": "llama.cpp"
+  "backend": "reverse-proxy",
+  "upstream": {
+    "url": "https://cj2api.keh5.workers.dev/v1/chat/completions",
+    "model": "llama3.1-8B"
+  },
+  "local_model": false,
+  "models_installed": 0
 }
