@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PLAME 1.0 AI Tester</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#0f1115;color:#f4f4f5;height:100vh;display:flex;flex-direction:column}
+header{padding:14px 18px;background:#171a21;border-bottom:1px solid #2b2f3a;display:flex;gap:12px;align-items:center;flex-wrap:wrap}header h1{margin:0;font-size:20px}.sub{color:#a7adba;font-size:13px}.status{margin-left:auto;font-size:13px;color:#8fe388}
+main{flex:1;min-height:0;display:grid;grid-template-columns:1fr 330px}.chat-area{display:flex;flex-direction:column;min-width:0}#messages{flex:1;overflow-y:auto;padding:20px}.msg{max-width:900px;margin:0 auto 14px;padding:12px 14px;border-radius:14px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}.user{background:#24324a}.assistant{background:#1b1f27;border:1px solid #2b2f3a}.error{background:#4a1d24;border:1px solid #7d2b39}.attachment{max-width:900px;margin:-7px auto 14px;color:#b8c0cf;font-size:12px}.composer{padding:12px;border-top:1px solid #2b2f3a;background:#171a21}.composer-inner{max-width:900px;margin:auto}textarea{width:100%;min-height:90px;resize:vertical;border:1px solid #343946;border-radius:12px;background:#0f1115;color:#fff;padding:12px;outline:none}.row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}button,select,input[type=text]{border:1px solid #343946;border-radius:10px;background:#222631;color:#fff;padding:10px 12px;cursor:pointer}button:hover{background:#2c3240}button.primary{background:#3b82f6;border-color:#3b82f6}button.primary:hover{background:#2563eb}button:disabled{opacity:.55;cursor:not-allowed}#imagePreview{display:none;margin-top:8px;max-width:220px;max-height:160px;border-radius:10px;border:1px solid #343946}
+aside{border-left:1px solid #2b2f3a;background:#13161c;padding:16px;overflow-y:auto}aside h2{margin-top:0;font-size:16px}.card{border:1px solid #2b2f3a;border-radius:12px;padding:12px;margin-bottom:12px;background:#181b22}.label{display:block;font-size:12px;color:#a7adba;margin-bottom:6px}input[type=text]{width:100%}#generatedImage{width:100%;border-radius:10px;display:none;margin-top:10px}.small{font-size:12px;color:#a7adba;line-height:1.45}a{color:#8ab4ff}
+@media(max-width:900px){main{grid-template-columns:1fr}aside{border-left:0;border-top:1px solid #2b2f3a}.status{margin-left:0}}
+</style>
+</head>
+<body>
+<header>
+<h1>PLAME 1.0 AI Tester</h1><span class="sub">pipo/plame-1.0</span><span class="status" id="status">Checking API...</span>
+</header>
+<main>
+<section class="chat-area">
+<div id="messages"></div>
+<div class="composer"><div class="composer-inner">
+<textarea id="prompt" placeholder="Hỏi PLAME AI..."></textarea>
+<img id="imagePreview" alt="Preview">
+<div class="row">
+<button id="uploadBtn">📷 Tải ảnh</button><input id="imageInput" type="file" accept="image/*" hidden>
+<button id="sendBtn" class="primary">Gửi</button><button id="clearBtn">Xóa chat</button>
+</div>
+<div class="row"><label class="small"><input id="stream" type="checkbox"> Stream</label></div>
+</div></div>
+</section>
+<aside>
+<h2>Tạo ảnh</h2>
+<div class="card">
+<span class="label">Prompt</span>
+<textarea id="imagePrompt" style="min-height:110px" placeholder="A cute penguin in a futuristic city"></textarea>
+<div class="row"><select id="imageSize"><option value="1024x1024">1024x1024</option><option value="768x1024">768x1024</option><option value="1024x768">1024x768</option><option value="512x512">512x512</option></select><button id="generateBtn" class="primary">Tạo ảnh</button></div>
+<img id="generatedImage" alt="Generated image"><div id="imageResult" class="small"></div>
+</div>
+<h2>API</h2>
+<div class="card"><span class="label">Base URL</span><input id="baseUrl" type="text" value="https://plame-1-0-ai-3.onrender.com"><div class="small" style="margin-top:8px">Chat: /v1/chat/completions<br>Models: /v1/models<br>Images: /v1/images/generations</div></div>
+</aside>
+</main>
+<script>
+const baseUrlInput=document.getElementById('baseUrl'),messagesEl=document.getElementById('messages'),promptEl=document.getElementById('prompt'),sendBtn=document.getElementById('sendBtn'),clearBtn=document.getElementById('clearBtn'),uploadBtn=document.getElementById('uploadBtn'),imageInput=document.getElementById('imageInput'),imagePreview=document.getElementById('imagePreview'),statusEl=document.getElementById('status'),streamEl=document.getElementById('stream'),imagePromptEl=document.getElementById('imagePrompt'),imageSizeEl=document.getElementById('imageSize'),generateBtn=document.getElementById('generateBtn'),generatedImage=document.getElementById('generatedImage'),imageResult=document.getElementById('imageResult');
+let selectedImageDataUrl=null,history=[];function baseUrl(){return baseUrlInput.value.trim().replace(/\/+$/,'')}function addMessage(role,text,extra=''){const el=document.createElement('div');el.className='msg '+role+' '+extra;el.textContent=text;messagesEl.appendChild(el);messagesEl.scrollTop=messagesEl.scrollHeight;return el}function addAttachment(text){const el=document.createElement('div');el.className='attachment';el.textContent=text;messagesEl.appendChild(el);messagesEl.scrollTop=messagesEl.scrollHeight}
+async function checkApi(){statusEl.textContent='Checking API...';try{const r=await fetch(baseUrl()+'/health');statusEl.textContent=r.ok?'API online':'API error';statusEl.style.color=r.ok?'#8fe388':'#ff8b8b'}catch(e){statusEl.textContent='API offline / CORS';statusEl.style.color='#ff8b8b'}}
+function fileToDataURL(file){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(file)})}
+uploadBtn.onclick=()=>imageInput.click();imageInput.onchange=async()=>{const file=imageInput.files?.[0];if(!file)return;try{selectedImageDataUrl=await fileToDataURL(file);imagePreview.src=selectedImageDataUrl;imagePreview.style.display='block';addAttachment('Ảnh đính kèm: '+file.name)}catch(e){selectedImageDataUrl=null;addMessage('assistant','Không đọc được ảnh.','error')}};
+clearBtn.onclick=()=>{history=[];messagesEl.innerHTML='';promptEl.value='';selectedImageDataUrl=null;imageInput.value='';imagePreview.removeAttribute('src');imagePreview.style.display='none'};
+sendBtn.onclick=sendMessage;promptEl.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}};
+async function sendMessage(){const text=promptEl.value.trim();if(!text&&!selectedImageDataUrl)return;const content=[];if(text)content.push({type:'text',text});if(selectedImageDataUrl)content.push({type:'image_url',image_url:{url:selectedImageDataUrl}});addMessage('user',text||'[Image]');if(selectedImageDataUrl)addAttachment('Vision image attached.');history.push({role:'user',content});promptEl.value='';sendBtn.disabled=true;const assistantEl=addMessage('assistant','Thinking...');try{const payload={model:'pipo/plame-1.0',messages:history,max_tokens:500,temperature:.7,stream:Boolean(streamEl.checked)};if(payload.stream){const r=await fetch(baseUrl()+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(!r.ok)throw new Error(await r.text());if(!r.body)throw new Error('Missing response body');const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',full='';assistantEl.textContent='';while(true){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const lines=buffer.split('\n');buffer=lines.pop()||'';for(const line of lines){const t=line.trim();if(!t.startsWith('data:'))continue;const d=t.slice(5).trim();if(d==='[DONE]')continue;try{const chunk=JSON.parse(d);const delta=chunk.choices?.[0]?.delta?.content||'';full+=delta;assistantEl.textContent=full;messagesEl.scrollTop=messagesEl.scrollHeight}catch{}}}history.push({role:'assistant',content:full})}else{const r=await fetch(baseUrl()+'/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await r.json();if(!r.ok)throw new Error(data?.error?.message||JSON.stringify(data));const answer=data?.choices?.[0]?.message?.content||'';assistantEl.textContent=answer||'(Empty response)';history.push({role:'assistant',content:answer})}}catch(e){assistantEl.remove();addMessage('assistant','ERROR: '+(e.message||String(e)),'error');history.pop()}finally{sendBtn.disabled=false;selectedImageDataUrl=null;imageInput.value='';imagePreview.removeAttribute('src');imagePreview.style.display='none'}}
+generateBtn.onclick=generateImage;async function generateImage(){const prompt=imagePromptEl.value.trim();if(!prompt){imageResult.textContent='Nhập prompt trước.';return}generateBtn.disabled=true;generatedImage.style.display='none';imageResult.textContent='Đang tạo ảnh...';try{const r=await fetch(baseUrl()+'/v1/images/generations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,size:imageSizeEl.value,nologo:true})});const data=await r.json();if(!r.ok)throw new Error(data?.error?.message||JSON.stringify(data));const url=data?.data?.[0]?.url;if(!url)throw new Error('Không nhận được URL ảnh.');generatedImage.src=url;generatedImage.style.display='block';imageResult.textContent='Đã tạo ảnh.'}catch(e){imageResult.textContent='ERROR: '+(e.message||String(e))}finally{generateBtn.disabled=false}}
+checkApi();
+</script>
+</body>
+</html>
