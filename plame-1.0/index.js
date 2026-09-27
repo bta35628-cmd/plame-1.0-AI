@@ -4,12 +4,33 @@ const app = express();
 
 const PORT = Number(process.env.PORT || 10000);
 
-const PUBLIC_MODEL = "pipo/plame-1.0";
-const UPSTREAM_MODEL = "llama3.1-8B";
+// =====================================================
+// PLAME PUBLIC MODEL
+// =====================================================
 
-const UPSTREAM_URL =
-  process.env.UPSTREAM_URL ||
+const PUBLIC_MODEL = "pipo/plame-1.0";
+
+// =====================================================
+// CHAT UPSTREAM
+// =====================================================
+
+const CHAT_UPSTREAM_URL =
+  process.env.CHAT_UPSTREAM_URL ||
   "https://cj2api.keh5.workers.dev/v1/chat/completions";
+
+const CHAT_UPSTREAM_MODEL = "llama3.1-8B";
+
+// =====================================================
+// IMAGE UPSTREAM
+// =====================================================
+
+const IMAGE_UPSTREAM_URL =
+  process.env.IMAGE_UPSTREAM_URL ||
+  "https://image.pollinations.ai";
+
+// =====================================================
+// EXPRESS
+// =====================================================
 
 app.disable("x-powered-by");
 
@@ -19,9 +40,9 @@ app.use(
   })
 );
 
-// ==============================
+// =====================================================
 // CORS
-// ==============================
+// =====================================================
 
 app.use((req, res, next) => {
   res.setHeader(
@@ -46,9 +67,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// ==============================
+// =====================================================
 // ERROR
-// ==============================
+// =====================================================
 
 function apiError(
   res,
@@ -66,22 +87,24 @@ function apiError(
   });
 }
 
-// ==============================
-// PUBLIC MODEL
-// ==============================
+// =====================================================
+// PUBLIC MODEL OBJECT
+// =====================================================
 
 function publicModel() {
   return {
     id: PUBLIC_MODEL,
     object: "model",
-    created: Math.floor(Date.now() / 1000),
+    created: Math.floor(
+      Date.now() / 1000
+    ),
     owned_by: "plame"
   };
 }
 
-// ==============================
+// =====================================================
 // HOME
-// ==============================
+// =====================================================
 
 app.get("/", (req, res) => {
   res.json({
@@ -90,36 +113,55 @@ app.get("/", (req, res) => {
 
     model: PUBLIC_MODEL,
 
-    upstream_model: UPSTREAM_MODEL,
+    chat: {
+      model: CHAT_UPSTREAM_MODEL,
+      endpoint:
+        "/v1/chat/completions"
+    },
 
-    upstream_url: UPSTREAM_URL,
-
-    vision: true,
+    image: {
+      endpoint:
+        "/v1/images/generations",
+      upstream:
+        IMAGE_UPSTREAM_URL
+    },
 
     endpoints: {
       models: "/v1/models",
       chat: "/v1/chat/completions",
+      images: "/v1/images/generations",
       health: "/health"
     }
   });
 });
 
-// ==============================
+// =====================================================
 // HEALTH
-// ==============================
+// =====================================================
 
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
+
     model: PUBLIC_MODEL,
-    upstream_model: UPSTREAM_MODEL,
-    vision: true
+
+    chat: {
+      enabled: true,
+      upstream_model: CHAT_UPSTREAM_MODEL
+    },
+
+    image_generation: {
+      enabled: true,
+      upstream: IMAGE_UPSTREAM_URL
+    }
   });
 });
 
-// ==============================
-// ONLY ONE MODEL
-// ==============================
+// =====================================================
+// MODELS
+//
+// EXACTLY ONE PUBLIC MODEL
+// =====================================================
 
 app.get("/v1/models", (req, res) => {
   res.json({
@@ -131,70 +173,40 @@ app.get("/v1/models", (req, res) => {
   });
 });
 
-// ==============================
-// HEADERS
-// ==============================
+// =====================================================
+// CHAT HEADERS
+// =====================================================
 
-function createUpstreamHeaders(req) {
+function createChatHeaders(req) {
   const headers = {
     "Content-Type": "application/json"
   };
 
-  const clientAuthorization =
+  const incomingAuth =
     req.get("authorization");
 
-  if (clientAuthorization) {
+  if (incomingAuth) {
     headers.Authorization =
-      clientAuthorization;
+      incomingAuth;
   }
 
-  if (process.env.UPSTREAM_API_KEY) {
+  if (process.env.CHAT_UPSTREAM_API_KEY) {
     headers.Authorization =
       "Bearer " +
-      process.env.UPSTREAM_API_KEY;
+      process.env.CHAT_UPSTREAM_API_KEY;
   }
 
   return headers;
 }
 
-// ==============================
-// CHECK VISION CONTENT
-// ==============================
-
-function containsVisionContent(messages) {
-  for (const message of messages) {
-    if (!message || typeof message !== "object") {
-      continue;
-    }
-
-    if (!Array.isArray(message.content)) {
-      continue;
-    }
-
-    for (const part of message.content) {
-      if (!part || typeof part !== "object") {
-        continue;
-      }
-
-      if (part.type === "image_url") {
-        return true;
-      }
-
-      if (
-        part.type === "input_image" ||
-        part.type === "image"
-      ) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-// ==============================
-// CHAT COMPLETIONS
-// ==============================
+// =====================================================
+// CHAT
+//
+// pipo/plame-1.0
+//        -> llama3.1-8B
+//
+// Vision content is forwarded unchanged.
+// =====================================================
 
 app.post(
   "/v1/chat/completions",
@@ -202,7 +214,6 @@ app.post(
     try {
       const body = req.body || {};
 
-      // messages required
       if (!Array.isArray(body.messages)) {
         return apiError(
           res,
@@ -211,7 +222,7 @@ app.post(
         );
       }
 
-      // Only pipo/plame-1.0 is accepted
+      // Do not allow another public model ID.
       if (
         body.model &&
         body.model !== PUBLIC_MODEL
@@ -225,63 +236,47 @@ app.post(
         );
       }
 
-      const isVision =
-        containsVisionContent(
-          body.messages
-        );
-
       /*
        * IMPORTANT:
        *
-       * We do NOT modify:
+       * The whole request is preserved.
        *
-       * messages[].content
-       * image_url
-       * image data
-       * base64 image
-       * image URLs
+       * This includes:
+       * - messages
+       * - text
+       * - image_url
+       * - base64 image data
+       * - temperature
+       * - top_p
+       * - max_tokens
+       * - stream
+       * - tools
+       * - tool_choice
+       * - response_format
        *
-       * Vision content is forwarded unchanged.
+       * Only the model field changes.
        */
 
       const upstreamBody = {
         ...body,
 
-        // Public model -> upstream model
-        model: UPSTREAM_MODEL
+        model:
+          CHAT_UPSTREAM_MODEL
       };
-
-      // Optional metadata header
-      // This does not modify the request body.
-      const headers =
-        createUpstreamHeaders(req);
-
-      if (isVision) {
-        headers["X-PLAME-Vision"] = "true";
-      }
-
-      console.log(
-        "Request:",
-        isVision
-          ? "VISION"
-          : "TEXT"
-      );
-
-      // ==============================
-      // SEND TO UPSTREAM
-      // ==============================
 
       const upstreamResponse =
         await fetch(
-          UPSTREAM_URL,
+          CHAT_UPSTREAM_URL,
           {
             method: "POST",
 
-            headers,
+            headers:
+              createChatHeaders(req),
 
-            body: JSON.stringify(
-              upstreamBody
-            )
+            body:
+              JSON.stringify(
+                upstreamBody
+              )
           }
         );
 
@@ -290,12 +285,12 @@ app.post(
           "content-type"
         ) || "";
 
-      // ==============================
+      // -------------------------------------------------
       // UPSTREAM ERROR
-      // ==============================
+      // -------------------------------------------------
 
       if (!upstreamResponse.ok) {
-        const errorText =
+        const text =
           await upstreamResponse.text();
 
         res.status(
@@ -308,12 +303,12 @@ app.post(
             "application/json"
         );
 
-        return res.send(errorText);
+        return res.send(text);
       }
 
-      // ==============================
-      // STREAMING
-      // ==============================
+      // -------------------------------------------------
+      // STREAM
+      // -------------------------------------------------
 
       if (
         body.stream === true ||
@@ -366,18 +361,18 @@ app.post(
         return res.end();
       }
 
-      // ==============================
+      // -------------------------------------------------
       // NORMAL JSON
-      // ==============================
+      // -------------------------------------------------
 
-      const responseText =
+      const text =
         await upstreamResponse.text();
 
       try {
         const data =
-          JSON.parse(responseText);
+          JSON.parse(text);
 
-        // Return the public PLAME ID
+        // Expose only PLAME model ID.
         data.model =
           PUBLIC_MODEL;
 
@@ -398,12 +393,12 @@ app.post(
           .status(
             upstreamResponse.status
           )
-          .send(responseText);
+          .send(text);
       }
 
     } catch (error) {
       console.error(
-        "PLAME proxy error:",
+        "Chat proxy error:",
         error
       );
 
@@ -411,16 +406,247 @@ app.post(
         res,
         502,
         error.message ||
-          "Upstream request failed",
+          "Chat upstream failed",
         "upstream_error"
       );
     }
   }
 );
 
-// ==============================
+// =====================================================
+// IMAGE GENERATION
+//
+// POST /v1/images/generations
+//
+// Example:
+// {
+//   "prompt": "a cat in space",
+//   "size": "1024x1024"
+// }
+//
+// The proxy calls:
+// https://image.pollinations.ai/prompt/{prompt}
+//
+// No additional PLAME model is exposed.
+// =====================================================
+
+app.post(
+  "/v1/images/generations",
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+
+      if (
+        !body.prompt ||
+        typeof body.prompt !== "string"
+      ) {
+        return apiError(
+          res,
+          400,
+          "prompt must be a non-empty string"
+        );
+      }
+
+      // -----------------------------------------------
+      // SIZE
+      // -----------------------------------------------
+
+      let width = 1024;
+      let height = 1024;
+
+      if (
+        typeof body.size === "string" &&
+        /^\d+x\d+$/.test(body.size)
+      ) {
+        const parts =
+          body.size.split("x");
+
+        width =
+          Math.max(
+            1,
+            Math.min(
+              2048,
+              Number(parts[0])
+            )
+          );
+
+        height =
+          Math.max(
+            1,
+            Math.min(
+              2048,
+              Number(parts[1])
+            )
+          );
+      }
+
+      // -----------------------------------------------
+      // QUERY PARAMETERS
+      // -----------------------------------------------
+
+      const params =
+        new URLSearchParams();
+
+      params.set(
+        "width",
+        String(width)
+      );
+
+      params.set(
+        "height",
+        String(height)
+      );
+
+      // Optional seed
+      if (
+        body.seed !== undefined &&
+        body.seed !== null
+      ) {
+        params.set(
+          "seed",
+          String(body.seed)
+        );
+      }
+
+      // Optional enhance
+      if (
+        body.enhance !== undefined
+      ) {
+        params.set(
+          "enhance",
+          String(
+            Boolean(body.enhance)
+          )
+        );
+      }
+
+      // Optional safe
+      if (
+        body.safe !== undefined
+      ) {
+        params.set(
+          "safe",
+          String(
+            Boolean(body.safe)
+          )
+        );
+      }
+
+      // Optional nologo
+      if (
+        body.nologo !== undefined
+      ) {
+        params.set(
+          "nologo",
+          String(
+            Boolean(body.nologo)
+          )
+        );
+      }
+
+      /*
+       * We intentionally do NOT expose a second
+       * PLAME model through /v1/models.
+       *
+       * The image endpoint simply forwards the
+       * prompt to Pollinations.
+       */
+
+      const prompt =
+        encodeURIComponent(
+          body.prompt
+        );
+
+      const imageUrl =
+        IMAGE_UPSTREAM_URL +
+        "/prompt/" +
+        prompt +
+        "?" +
+        params.toString();
+
+      // -----------------------------------------------
+      // OPTIONAL POLLINATIONS API KEY
+      // -----------------------------------------------
+
+      const imageHeaders = {};
+
+      if (
+        process.env.POLLINATIONS_API_KEY
+      ) {
+        imageHeaders.Authorization =
+          "Bearer " +
+          process.env.POLLINATIONS_API_KEY;
+      }
+
+      console.log(
+        "Generating image through Pollinations"
+      );
+
+      const imageResponse =
+        await fetch(
+          imageUrl,
+          {
+            method: "GET",
+            headers: imageHeaders
+          }
+        );
+
+      if (!imageResponse.ok) {
+        const errorText =
+          await imageResponse.text();
+
+        return res
+          .status(
+            imageResponse.status
+          )
+          .json({
+            error: {
+              message:
+                errorText ||
+                "Image generation failed",
+              type:
+                "image_generation_error"
+            }
+          });
+      }
+
+      /*
+       * Instead of downloading the image into Render,
+       * return the Pollinations URL.
+       */
+
+      return res.json({
+        created: Math.floor(
+          Date.now() / 1000
+        ),
+
+        data: [
+          {
+            url: imageUrl
+          }
+        ]
+      });
+
+    } catch (error) {
+      console.error(
+        "Image proxy error:",
+        error
+      );
+
+      return apiError(
+        res,
+        502,
+        error.message ||
+          "Image generation failed",
+        "image_generation_error"
+      );
+    }
+  }
+);
+
+// =====================================================
 // START
-// ==============================
+// =====================================================
 
 app.listen(
   PORT,
@@ -448,17 +674,18 @@ app.listen(
     );
 
     console.log(
-      "Upstream model: " +
-        UPSTREAM_MODEL
+      "Chat upstream: " +
+        CHAT_UPSTREAM_URL
     );
 
     console.log(
-      "Upstream: " +
-        UPSTREAM_URL
+      "Chat model: " +
+        CHAT_UPSTREAM_MODEL
     );
 
     console.log(
-      "Vision: ENABLED"
+      "Image upstream: " +
+        IMAGE_UPSTREAM_URL
     );
 
     console.log(
